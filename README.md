@@ -2,6 +2,8 @@
 
 一款基于 SwiftUI 构建的极简、高颜值且无广告的智能体脂秤 iOS 客户端，支持与沃莱（Welland / Fitdays / Icomon）协议的智能体脂秤进行蓝牙连接，实时同步测量数据，并提供多维度身体指标计算及家庭成员管理功能。
 
+安卓项目地址https://github.com/maoziban/smart-body-scale-android
+
 ---
 
 ## 🌟 功能特性
