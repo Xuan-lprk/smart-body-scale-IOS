@@ -6,12 +6,14 @@ import Combine
 @main struct AntAfouScaleApp: App {
     @StateObject private var scale = ScaleManager()
     @StateObject private var profile = UserProfile()
+    @StateObject private var healthKit = HealthKitManager()
 
     var body: some Scene {
         WindowGroup {
             ContentView()
                 .environmentObject(scale)
                 .environmentObject(profile)
+                .environmentObject(healthKit)
         }
     }
 }
@@ -19,6 +21,7 @@ import Combine
 struct ContentView: View {
     @EnvironmentObject private var scale: ScaleManager
     @EnvironmentObject private var profile: UserProfile
+    @EnvironmentObject private var healthKit: HealthKitManager
     @State private var tab = 0
     @AppStorage("afu.hasPairedScale") private var hasPairedScale = false
     @AppStorage("afu.family.hasPromptedInitial") private var hasPromptedInitial = false
@@ -40,7 +43,10 @@ struct ContentView: View {
             }
         }
         .tint(.teal)
-        .onAppear { scale.profile = profile }
+        .onAppear {
+            scale.profile = profile
+            scale.healthKit = healthKit
+        }
         .onAppear { promptForInitialMemberIfNeeded() }
         .onChange(of: hasPairedScale) { _ in promptForInitialMemberIfNeeded() }
         .onChange(of: scale.unrecognizedWeight) { weight in
@@ -118,7 +124,11 @@ struct DashboardView: View {
                 if scale.isMeasuring {
                     ProgressView().tint(.teal)
                 } else if scale.impedance > 0 {
-                    Label("\(Int(scale.impedance)) Ω", systemImage: "bolt.heart")
+                    Label(
+                        scale.selectedADCIndex.map { "ADC \($0 + 1) · \(Int(scale.impedance)) Ω" }
+                            ?? "\(Int(scale.impedance)) Ω",
+                        systemImage: "bolt.heart"
+                    )
                         .font(.caption)
                         .fontWeight(.semibold)
                         .foregroundStyle(.teal)
@@ -235,7 +245,11 @@ struct MeasurementDetailView: View {
                     }
                     Spacer()
                     if measurement.impedance > 0 {
-                        Label("\(Int(measurement.impedance)) Ω", systemImage: "bolt.heart")
+                        Label(
+                            measurement.adcIndex.map { "ADC \($0 + 1) · \(Int(measurement.impedance)) Ω" }
+                                ?? "\(Int(measurement.impedance)) Ω",
+                            systemImage: "bolt.heart"
+                        )
                             .font(.caption)
                             .fontWeight(.semibold)
                             .foregroundStyle(.teal)
@@ -310,7 +324,7 @@ struct PairingView: View {
                     .listRowBackground(Color.clear)
                 }
                 
-                Section { Button { scale.startScan() } label: { Label(scale.isScanning ? "正在搜索体脂秤…" : "重新搜索", systemImage: "magnifyingglass") } } footer: { Text("仅显示名称以 AFU-WL 开头、且符合协议特征的设备。") }
+                Section { Button { scale.startScan() } label: { Label(scale.isScanning ? "正在搜索体脂秤…" : "重新搜索", systemImage: "magnifyingglass") } } footer: { Text("会像 CLI 一样扫描全部蓝牙广播，再筛选名称以 AFU-WL 开头、且符合协议特征的设备。") }
                 if !scale.discoveredDevices.isEmpty { Section("发现的设备") { ForEach(scale.discoveredDevices) { d in Button { scale.connect(d) } label: { HStack { VStack(alignment: .leading) { Text(d.name); Text(d.identifier).font(.caption).foregroundStyle(.secondary) }; Spacer(); Text("\(d.rssi) dBm").font(.caption) } } } } }
             }
             .navigationTitle("设备配对")
@@ -327,16 +341,71 @@ struct PairingView: View {
 struct ProfileView: View {
     @EnvironmentObject private var profile: UserProfile
     @EnvironmentObject private var scale: ScaleManager
-    @AppStorage("afu.hasPairedScale") private var hasPairedScale = false
+    @EnvironmentObject private var healthKit: HealthKitManager
+    @AppStorage(HealthKitManager.enabledKey) private var healthSyncEnabled = false
+    @AppStorage(HealthKitManager.weightKey) private var syncWeight = true
+    @AppStorage(HealthKitManager.bmiKey) private var syncBMI = true
+    @AppStorage(HealthKitManager.bodyFatKey) private var syncBodyFat = true
+    @AppStorage(HealthKitManager.leanBodyMassKey) private var syncLeanBodyMass = true
+    @AppStorage(ImpedanceADCChoice.storageKey) private var selectedADCIndex = ImpedanceADCChoice.first.rawValue
     @State private var showingAddMember = false
     var body: some View {
         NavigationStack { Form {
             Section("我的设备") {
                 HStack { Image(systemName: "scalemass").foregroundStyle(.teal); VStack(alignment: .leading) { Text(scale.deviceName ?? "AFU Welland 体脂秤"); Text(scale.connectionState.title).font(.caption).foregroundStyle(.secondary) }; Spacer(); Circle().fill(scale.connectionState.color).frame(width: 9, height: 9) }
                 Button { scale.startScan() } label: { Label("重新连接", systemImage: "arrow.clockwise") }
-                Button(role: .destructive) { hasPairedScale = false } label: { Label("更换体脂秤", systemImage: "arrow.triangle.2.circlepath") }
+                Button(role: .destructive) { scale.forgetPairedScale() } label: { Label("更换体脂秤", systemImage: "arrow.triangle.2.circlepath") }
             }
             Section("个人资料") { Picker("性别", selection: $profile.sex) { Text("女").tag(Sex.female); Text("男").tag(Sex.male) }; DatePicker("出生日期", selection: $profile.birthDate, displayedComponents: .date); Stepper("身高 \(Int(profile.height)) cm", value: $profile.height, in: 100...230) }
+            Section {
+                Picker("用于体脂计算", selection: $selectedADCIndex) {
+                    Text("ADC 1").tag(ImpedanceADCChoice.first.rawValue)
+                    Text("ADC 2").tag(ImpedanceADCChoice.second.rawValue)
+                }
+                .pickerStyle(.segmented)
+            } header: {
+                Text("阻抗选择")
+            } footer: {
+                Text("秤每次会发送两个 ADC。其物理含义仍未确认；选择只影响之后的新测量，不会改写历史记录。当前一次官方对照中 ADC 2 更接近阿福结果，但这不代表它一定更准确。")
+            }
+            Section {
+                Toggle("自动写入 Apple 健康", isOn: $healthSyncEnabled)
+                    .onChange(of: healthSyncEnabled) { enabled in
+                        if enabled {
+                            healthKit.requestAuthorization()
+                        } else {
+                            healthKit.refreshStatus()
+                        }
+                    }
+                Toggle("体重（秤直接测量）", isOn: $syncWeight)
+                    .disabled(!healthSyncEnabled)
+                Toggle("BMI（计算值）", isOn: $syncBMI)
+                    .disabled(!healthSyncEnabled)
+                Toggle("体脂率（BIA 估算）", isOn: $syncBodyFat)
+                    .disabled(!healthSyncEnabled)
+                Toggle("去脂体重（由体脂计算）", isOn: $syncLeanBodyMass)
+                    .disabled(!healthSyncEnabled)
+                Button("检查或重新申请权限") {
+                    healthKit.requestAuthorization()
+                }
+                .disabled(!healthSyncEnabled)
+                Label(healthKit.statusText, systemImage: "heart.text.square")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                if let lastSyncText = healthKit.lastSyncText {
+                    Text(lastSyncText)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            } header: {
+                Text("Apple 健康")
+            } footer: {
+                Text("只自动同步归属于“本人”的实时测量。体重为直接测量；BMI、体脂率和去脂体重包含公式估算。历史包和家庭成员不会自动写入。")
+            }
+            .onChange(of: syncWeight) { _ in refreshHealthAuthorization() }
+            .onChange(of: syncBMI) { _ in refreshHealthAuthorization() }
+            .onChange(of: syncBodyFat) { _ in refreshHealthAuthorization() }
+            .onChange(of: syncLeanBodyMass) { _ in refreshHealthAuthorization() }
             Section {
                 ForEach(profile.members) { member in
                     HStack { Image(systemName: "person.crop.circle").foregroundStyle(.teal); Text(member.name); Spacer(); Text(member.sex == .female ? "女" : "男").font(.caption).foregroundStyle(.secondary) }
@@ -363,7 +432,13 @@ struct ProfileView: View {
             }
         }.navigationTitle("我的资料")
             .sheet(isPresented: $showingAddMember) { AddFamilyMemberView { profile.addMember($0) } }
+            .onAppear { healthKit.refreshStatus() }
         }
+    }
+
+    private func refreshHealthAuthorization() {
+        guard healthSyncEnabled else { return }
+        healthKit.requestAuthorization()
     }
 }
 
@@ -396,9 +471,16 @@ struct AddFamilyMemberView: View {
     ContentView()
         .environmentObject(ScaleManager())
         .environmentObject(UserProfile())
+        .environmentObject(HealthKitManager())
 }
 
 enum Sex: String, CaseIterable, Codable { case female, male }
+
+enum ImpedanceADCChoice: Int {
+    static let storageKey = "afu.algorithm.adcIndex"
+    case first = 0
+    case second = 1
+}
 
 struct FamilyMember: Identifiable, Codable {
     let id: UUID
@@ -412,13 +494,24 @@ struct FamilyMember: Identifiable, Codable {
 }
 
 @MainActor final class UserProfile: ObservableObject {
-    @Published var sex: Sex = .female
-    @Published var height: Double = 165
-    @Published var birthDate = Calendar.current.date(byAdding: .year, value: -28, to: .now) ?? .now
+    @Published var sex: Sex = .female { didSet { savePrimaryProfile() } }
+    @Published var height: Double = 165 { didSet { savePrimaryProfile() } }
+    @Published var birthDate = Calendar.current.date(byAdding: .year, value: -28, to: .now) ?? .now { didSet { savePrimaryProfile() } }
     @Published var members: [FamilyMember] = []
     var age: Int { Calendar.current.dateComponents([.year], from: birthDate, to: .now).year ?? 28 }
     private let primaryID = UUID(uuidString: "00000000-0000-0000-0000-000000000001")!
-    init() { if let data = UserDefaults.standard.data(forKey: "afu.family.members"), let saved = try? JSONDecoder().decode([FamilyMember].self, from: data) { members = saved } }
+    init() {
+        if let data = UserDefaults.standard.data(forKey: "afu.primary.profile"),
+           let saved = try? JSONDecoder().decode(StoredPrimaryProfile.self, from: data) {
+            sex = saved.sex
+            height = saved.height
+            birthDate = saved.birthDate
+        }
+        if let data = UserDefaults.standard.data(forKey: "afu.family.members"),
+           let saved = try? JSONDecoder().decode([FamilyMember].self, from: data) {
+            members = saved
+        }
+    }
     var primaryMember: FamilyMember { FamilyMember(id: primaryID, name: "本人", sex: sex, height: height, birthDate: birthDate, referenceWeight: 60) }
     func addMember(_ member: FamilyMember) { members.append(member); saveMembers() }
     func removeMembers(at offsets: IndexSet) { members.remove(atOffsets: offsets); saveMembers() }
@@ -441,16 +534,29 @@ struct FamilyMember: Identifiable, Codable {
         return smallestDifference > 7
     }
     private func saveMembers() { if let data = try? JSONEncoder().encode(members) { UserDefaults.standard.set(data, forKey: "afu.family.members") } }
+    private func savePrimaryProfile() {
+        let profile = StoredPrimaryProfile(sex: sex, height: height, birthDate: birthDate)
+        if let data = try? JSONEncoder().encode(profile) {
+            UserDefaults.standard.set(data, forKey: "afu.primary.profile")
+        }
+    }
+
+    private struct StoredPrimaryProfile: Codable {
+        let sex: Sex
+        let height: Double
+        let birthDate: Date
+    }
 }
 
 struct BodyMeasurement: Identifiable, Codable {
     let id: UUID; let date: Date; let weight: Double; let impedance: Double; let bmi: Double; let bodyFat: Double; let muscle: Double; let water: Double; let protein: Double; let boneMass: Double; let memberID: UUID?; let memberName: String?
+    var adcIndex: Int? = nil
     
     // Computed Properties for UI to show all required metrics (both percentage and mass)
     var bodyFatMass: Double { weight * (bodyFat / 100.0) }
     var musclePercent: Double { weight > 0 ? (muscle / weight) * 100.0 : 0.0 }
-    var skeletalMusclePercent: Double { musclePercent * 0.526 }
-    var skeletalMuscleMass: Double { muscle * 0.526 }
+    var skeletalMusclePercent: Double { musclePercent * 0.527 }
+    var skeletalMuscleMass: Double { muscle * 0.527 }
     var waterMass: Double { weight * (water / 100.0) }
     var proteinMass: Double { weight * (protein / 100.0) }
     var boneMassPercent: Double { weight > 0 ? (boneMass / weight) * 100.0 : 0.0 }
@@ -469,14 +575,17 @@ enum ConnectionState: Equatable { case bluetoothOff, idle, scanning, connecting,
 }
 
 @MainActor final class ScaleManager: NSObject, ObservableObject {
+    private static let pairedPeripheralIDKey = "afu.pairedPeripheralID"
     private let serviceUUID = CBUUID(string: "0000FFB0-0000-1000-8000-00805F9B34FB")
     private var central: CBCentralManager!
     private var activePeripheral: CBPeripheral?
     weak var profile: UserProfile?
+    weak var healthKit: HealthKitManager?
     @Published var connectionState: ConnectionState = .idle
     @Published var discoveredDevices: [DiscoveredScale] = []
     @Published var liveWeight = 0.0
     @Published var impedance = 0.0
+    @Published var selectedADCIndex: Int?
     @Published var currentMeasurement: BodyMeasurement?
     @Published var history: [BodyMeasurement] = []
     @Published var deviceName: String?
@@ -515,9 +624,34 @@ enum ConnectionState: Equatable { case bluetoothOff, idle, scanning, connecting,
             return
         }
         connectionState = .scanning
-        central.scanForPeripherals(withServices: [serviceUUID], options: [CBCentralManagerScanOptionAllowDuplicatesKey: false])
+        // 与 CLI/Bleak 一致：先接收全部广播，再在 didDiscover 中解析并筛选。
+        // 这台秤的 0xAC 协议数据可能放在 0x27AC Service Data 中；
+        // 若只按 FFB0 服务扫描，部分 iOS/iPadOS 设备可能收不到完整广播。
+        central.scanForPeripherals(
+            withServices: nil,
+            options: [CBCentralManagerScanOptionAllowDuplicatesKey: true]
+        )
     }
-    func connect(_ device: DiscoveredScale) { central.stopScan(); isScanning = false; connectionState = .connecting; activePeripheral = device.peripheral; central.connect(device.peripheral) }
+    func connect(_ device: DiscoveredScale) {
+        guard connectionState != .connecting, activePeripheral == nil else { return }
+        central.stopScan()
+        isScanning = false
+        connectionState = .connecting
+        activePeripheral = device.peripheral
+        deviceName = device.name
+        central.connect(device.peripheral)
+    }
+    func forgetPairedScale() {
+        UserDefaults.standard.set(false, forKey: "afu.hasPairedScale")
+        UserDefaults.standard.removeObject(forKey: Self.pairedPeripheralIDKey)
+        if let activePeripheral {
+            central.cancelPeripheralConnection(activePeripheral)
+        } else {
+            connectionState = .idle
+        }
+        deviceName = nil
+        discoveredDevices = []
+    }
     func removeHistory(at offsets: IndexSet) { history.remove(atOffsets: offsets); saveHistory() }
     private func finishMeasurement() {
         guard liveWeight > 0, let profile else { return }
@@ -525,17 +659,26 @@ enum ConnectionState: Equatable { case bluetoothOff, idle, scanning, connecting,
         hasSavedMeasurement = true
         let isNewMember = profile.shouldSuggestNewMember(for: liveWeight, history: history)
         let member = profile.matchedMember(for: liveWeight, history: history)
-        let measurement = BodyAlgorithm.measure(weight: liveWeight, impedance: impedance, member: member)
+        let measurement = BodyAlgorithm.measure(
+            weight: liveWeight,
+            impedance: impedance,
+            member: member,
+            adcIndex: selectedADCIndex
+        )
         currentMeasurement = measurement
         history.insert(measurement, at: 0)
         if isNewMember && unrecognizedWeight == nil { unrecognizedWeight = liveWeight }
         saveHistory()
+        let isPrimaryMember = member.id == profile.primaryMember.id
+        if isPrimaryMember && (!isNewMember || profile.members.isEmpty) {
+            healthKit?.save(measurement)
+        }
         log("[BLE] Stored stable measurement: weight=\(liveWeight) kg, impedance=\(impedance) Ohm")
     }
     func clearUnrecognizedWeight() { unrecognizedWeight = nil }
     func assignUnrecognizedMeasurement(to member: FamilyMember) {
         guard let measurement = currentMeasurement, let index = history.firstIndex(where: { $0.id == measurement.id }) else { return }
-        let updated = BodyMeasurement(id: measurement.id, date: measurement.date, weight: measurement.weight, impedance: measurement.impedance, bmi: measurement.bmi, bodyFat: measurement.bodyFat, muscle: measurement.muscle, water: measurement.water, protein: measurement.protein, boneMass: measurement.boneMass, memberID: member.id, memberName: member.name)
+        let updated = BodyMeasurement(id: measurement.id, date: measurement.date, weight: measurement.weight, impedance: measurement.impedance, bmi: measurement.bmi, bodyFat: measurement.bodyFat, muscle: measurement.muscle, water: measurement.water, protein: measurement.protein, boneMass: measurement.boneMass, memberID: member.id, memberName: member.name, adcIndex: measurement.adcIndex)
         currentMeasurement = updated; history[index] = updated; saveHistory()
     }
     private func saveHistory() { if let data = try? JSONEncoder().encode(history) { UserDefaults.standard.set(data, forKey: "afu.scale.history") } }
@@ -548,7 +691,10 @@ extension ScaleManager: @preconcurrency CBCentralManagerDelegate, @preconcurrenc
         if central.state == .poweredOn {
             if isScanning {
                 connectionState = .scanning
-                central.scanForPeripherals(withServices: [serviceUUID], options: [CBCentralManagerScanOptionAllowDuplicatesKey: false])
+                central.scanForPeripherals(
+                    withServices: nil,
+                    options: [CBCentralManagerScanOptionAllowDuplicatesKey: true]
+                )
             } else {
                 connectionState = .idle
             }
@@ -559,21 +705,29 @@ extension ScaleManager: @preconcurrency CBCentralManagerDelegate, @preconcurrenc
     }
     
     func centralManager(_ central: CBCentralManager, didDiscover peripheral: CBPeripheral, advertisementData: [String : Any], rssi RSSI: NSNumber) {
-        let name = peripheral.name ?? advertisementData[CBAdvertisementDataLocalNameKey] as? String ?? "未知设备"
+        let name = advertisementData[CBAdvertisementDataLocalNameKey] as? String ?? peripheral.name ?? "未知设备"
         let manufacturerData = advertisementData[CBAdvertisementDataManufacturerDataKey] as? Data
-        let isAFU = Self.isAFUAdvertisement(manufacturerData)
+        let serviceData = advertisementData[CBAdvertisementDataServiceDataKey] as? [CBUUID: Data]
+        let afuData = Self.afuAdvertisementData(
+            manufacturerData: manufacturerData,
+            serviceData: serviceData
+        )
+        let isAFU = afuData != nil
         let matchesPrefix = name.uppercased().hasPrefix("AFU-WL")
         
-        log("[BLE] Discovered: \(name) (\(peripheral.identifier.uuidString)), RSSI: \(RSSI), matches: \(matchesPrefix), isAFU: \(isAFU)")
-        
         guard matchesPrefix, isAFU else { return }
+
+        log("[BLE] Discovered supported scale: \(name) (\(peripheral.identifier.uuidString)), RSSI: \(RSSI), serviceData: \(serviceData?.keys.map(\.uuidString) ?? [])")
         
-        let discoveredMac = Self.macAddress(from: manufacturerData)
+        let discoveredMac = Self.macAddress(from: afuData)
         log("[BLE] Discovered scale MAC: \(discoveredMac ?? "nil")")
         
         // QR Scanner auto-connection removed
         
-        if UserDefaults.standard.bool(forKey: "afu.hasPairedScale") {
+        let pairedID = UserDefaults.standard.string(forKey: Self.pairedPeripheralIDKey)
+        let isLegacyPairing = UserDefaults.standard.bool(forKey: "afu.hasPairedScale") && pairedID == nil
+        let isKnownPeripheral = pairedID == peripheral.identifier.uuidString
+        if isLegacyPairing || isKnownPeripheral {
             log("[BLE] Auto-connecting to paired scale: \(name)")
             connect(DiscoveredScale(peripheral: peripheral, name: name, identifier: peripheral.identifier.uuidString, rssi: RSSI.intValue))
             return
@@ -587,8 +741,9 @@ extension ScaleManager: @preconcurrency CBCentralManagerDelegate, @preconcurrenc
     
     func centralManager(_ central: CBCentralManager, didConnect peripheral: CBPeripheral) {
         log("[BLE] Connected to: \(peripheral.name ?? "nil") (\(peripheral.identifier.uuidString))")
-        deviceName = peripheral.name
+        deviceName = peripheral.name ?? deviceName
         UserDefaults.standard.set(true, forKey: "afu.hasPairedScale")
+        UserDefaults.standard.set(peripheral.identifier.uuidString, forKey: Self.pairedPeripheralIDKey)
         connectionState = .connected
         peripheral.delegate = self
         // targetMacAddress reset removed
@@ -598,7 +753,11 @@ extension ScaleManager: @preconcurrency CBCentralManagerDelegate, @preconcurrenc
     
     func centralManager(_ central: CBCentralManager, didFailToConnect peripheral: CBPeripheral, error: Error?) {
         log("[BLE] Failed to connect to \(peripheral.name ?? "nil"), error: \(String(describing: error))")
+        activePeripheral = nil
         connectionState = .idle
+        if UserDefaults.standard.bool(forKey: "afu.hasPairedScale") {
+            startScan()
+        }
     }
     
     func centralManager(_ central: CBCentralManager, didDisconnectPeripheral peripheral: CBPeripheral, error: Error?) {
@@ -607,6 +766,7 @@ extension ScaleManager: @preconcurrency CBCentralManagerDelegate, @preconcurrenc
         activePeripheral = nil
         liveWeight = 0.0
         impedance = 0.0
+        selectedADCIndex = nil
         isStable = false
         isMeasuring = false
         hasSavedMeasurement = false
@@ -664,14 +824,54 @@ extension ScaleManager: @preconcurrency CBCentralManagerDelegate, @preconcurrenc
         receive(data)
     }
     
-    private static func isAFUAdvertisement(_ data: Data?) -> Bool {
-        guard let data, data.count >= 7 else { return false }
-        return data[0] == 0xAC
+    private static func afuAdvertisementData(
+        manufacturerData: Data?,
+        serviceData: [CBUUID: Data]?
+    ) -> Data? {
+        var candidates: [Data] = []
+
+        if let manufacturerData {
+            candidates.append(manufacturerData)
+        }
+
+        for (uuid, payload) in serviceData ?? [:] {
+            guard let uuid16 = uuid16(from: uuid), String(format: "%04X", uuid16).contains("AC") else {
+                continue
+            }
+            var reconstructed = Data([
+                UInt8(uuid16 & 0x00FF),
+                UInt8((uuid16 >> 8) & 0x00FF)
+            ])
+            reconstructed.append(payload)
+            candidates.append(reconstructed)
+        }
+
+        // 与 CLI 相同：0x27 的 flags 表示连接型、体脂秤 category=2、subtype=7。
+        return candidates.first { data in
+            guard data.count >= 2, data[0] == 0xAC else { return false }
+            let flags = data[1]
+            let category = (flags & 0x70) >> 4
+            let subtype = flags & 0x0F
+            return category == 2 && subtype == 7
+        }
+    }
+
+    private static func uuid16(from uuid: CBUUID) -> UInt16? {
+        let value = uuid.uuidString.uppercased()
+        let shortValue: String
+        if value.count == 4 {
+            shortValue = value
+        } else if value.hasPrefix("0000"), value.hasSuffix("-0000-1000-8000-00805F9B34FB") {
+            shortValue = String(value.dropFirst(4).prefix(4))
+        } else {
+            return nil
+        }
+        return UInt16(shortValue, radix: 16)
     }
     
-    private static func macAddress(from manufacturerData: Data?) -> String? {
-        guard let manufacturerData, manufacturerData.count >= 7, manufacturerData[0] == 0xAC else { return nil }
-        let macBytes = manufacturerData[1...6]
+    private static func macAddress(from advertisementData: Data?) -> String? {
+        guard let advertisementData, advertisementData.count >= 8, advertisementData[0] == 0xAC else { return nil }
+        let macBytes = advertisementData[2..<8].reversed()
         return macBytes.map { String(format: "%02X", $0) }.joined(separator: ":")
     }
     
@@ -684,29 +884,43 @@ extension ScaleManager: @preconcurrency CBCentralManagerDelegate, @preconcurrenc
         log("[BLE] Successfully parsed packet of type: \(packet.type)")
         switch packet.type {
         case .weight:
+            let wasMeasuring = isMeasuring
             liveWeight = packet.weight
             isStable = packet.stable
             isMeasuring = !packet.stable
             connectionState = packet.stable ? .connected : .measuring
             log("[BLE] Weight packet - liveWeight: \(liveWeight), stable: \(isStable)")
             
-            if liveWeight < 1.0 || isMeasuring {
+            if liveWeight < 1.0 || (!wasMeasuring && isMeasuring && !hasSavedMeasurement) {
+                impedance = 0
+                selectedADCIndex = nil
+            }
+            // 稳定包之后的短暂波动仍属于同一次上秤；只有离秤才解锁下一条记录。
+            if liveWeight < 1.0 {
                 hasSavedMeasurement = false
             }
             if isMeasuring && liveWeight > 3.0 {
                 currentMeasurement = nil
             }
             
-            // Extract impedance from the same D5 packet if present
-            if packet.raw.first == 0xAC && packet.impedance > 0 {
-                impedance = packet.impedance
-                log("[BLE] Extracted impedance from weight packet: \(impedance)")
-            }
-            
             if packet.stable && impedance > 0 { finishMeasurement() }
         case .impedance:
-            impedance = packet.impedance
-            log("[BLE] Impedance packet - impedance: \(impedance)")
+            let packetWeight = packet.adcWeight > 0 ? packet.adcWeight : liveWeight
+            let normalized = AFUPacket.normalizeImpedances(packet.adcs, weight: packetWeight)
+            let preferredIndex = UserDefaults.standard.integer(forKey: ImpedanceADCChoice.storageKey)
+            let preferredValue = normalized.indices.contains(preferredIndex) ? normalized[preferredIndex] : nil
+            if let preferredValue, (100.0...1500.0).contains(preferredValue) {
+                impedance = preferredValue
+                selectedADCIndex = preferredIndex
+            } else if let fallback = normalized.enumerated().first(where: { (100.0...1500.0).contains($0.element) }) {
+                impedance = fallback.element
+                selectedADCIndex = fallback.offset
+            } else {
+                impedance = 0
+                selectedADCIndex = nil
+            }
+            let selectedLabel = selectedADCIndex.map { "ADC \($0 + 1)" } ?? "none"
+            log("[BLE] Impedance packet - raw ADCs: \(packet.adcs), normalized: \(normalized), selected: \(selectedLabel) = \(impedance)")
             if isStable { finishMeasurement() }
         case .history:
             if let item = packet.historyMeasurement(profile: profile, history: history) {
@@ -781,23 +995,48 @@ struct AFUPacket {
         }
     }
     
-    var impedance: Double {
+    var adcs: [Double] {
         if raw.first == 0xAC {
-            if raw.count >= 10 && raw[18] == 0xD5 {
-                // In D5 weight packet, impedance is at index 8 and 9 (Big Endian)
-                let adc = Double(UInt16(raw[9]) | UInt16(raw[8]) << 8)
-                return adc >= 1500 ? adc * 0.88 : adc
-            } else {
-                // In D6 impedance packet, it's at index 2 and 3 (Little Endian)
-                guard raw.count >= 4 else { return 0 }
-                let adc = Double(UInt16(raw[2]) | UInt16(raw[3]) << 8)
-                return adc >= 1500 ? adc * 0.88 : adc
+            guard raw.count >= 19, raw[18] == 0xD6 else { return [] }
+            let count = Int(raw[2])
+            let start = 4
+            guard count > 0, start + count * 2 <= raw.count else { return [] }
+            return (0..<count).map { index in
+                let offset = start + index * 2
+                return Double(UInt16(raw[offset]) << 8 | UInt16(raw[offset + 1]))
             }
-        } else {
-            guard raw.count >= 3 else { return 0 }
-            let adc = Double(UInt16(raw[1]) | UInt16(raw[2]) << 8)
-            return adc >= 1500 ? adc * 0.88 : adc
         }
+
+        guard raw.first == 0xD6, raw.count >= 3 else { return [] }
+        return [Double(UInt16(raw[1]) << 8 | UInt16(raw[2]))]
+    }
+
+    var adcWeight: Double {
+        guard raw.first == 0xAC, raw.count >= 13, raw[18] == 0xD6 else { return 0 }
+        let encoded = UInt32(raw[9]) << 24
+            | UInt32(raw[10]) << 16
+            | UInt32(raw[11]) << 8
+            | UInt32(raw[12])
+        return Double(encoded & 0x0003_FFFF) / 1000.0
+    }
+
+    static func normalizeImpedances(_ adcs: [Double], weight: Double) -> [Double] {
+        if adcs.count == 5 {
+            return [adcs[4], adcs[0], adcs[1], adcs[2], adcs[3]].map(roundToTwoPlaces)
+        }
+        return adcs.map { adc in
+            let normalized: Double
+            if adc >= 1500, weight > 0 {
+                normalized = (((adc - 1000) + ((weight * 10) * -0.4)) / 0.6) / 10
+            } else {
+                normalized = adc
+            }
+            return roundToTwoPlaces(normalized)
+        }
+    }
+
+    nonisolated private static func roundToTwoPlaces(_ value: Double) -> Double {
+        (value * 100).rounded() / 100
     }
     
     @MainActor func historyMeasurement(profile: UserProfile?, history: [BodyMeasurement]) -> BodyMeasurement? {
@@ -817,19 +1056,70 @@ struct AFUPacket {
 }
 
 @MainActor enum BodyAlgorithm {
-    static func measure(weight: Double, impedance: Double, member: FamilyMember) -> BodyMeasurement {
+    static func measure(
+        weight: Double,
+        impedance: Double,
+        member: FamilyMember,
+        adcIndex: Int? = nil
+    ) -> BodyMeasurement {
         let heightM = member.height / 100
         let bmi = weight / (heightM * heightM)
-        let sexOffset = member.sex == .male ? -10.8 : 0.0
-        let fallback = 1.20 * bmi + 0.23 * Double(member.age) + sexOffset - 5.4
-        let bia = member.sex == .male ? 0.18 * bmi + 0.012 * Double(member.age) + 0.018 * impedance - 3.2 : 0.26 * bmi + 0.011 * Double(member.age) + 0.020 * impedance - 2.5
-        let fat = min(max(impedance > 0 ? bia : fallback, 5), 55)
-        let water = min(max(69.7 - fat * 0.55, 35), 75)
-        let bone = min(max(weight * (member.sex == .male ? 0.047 : 0.040), 1.5), 5.5)
-        let protein = min(max(16.0 + (water - 50) * 0.12, 10), 24)
-        let muscle = max(weight * (1 - fat / 100) - bone, 0)
-        return BodyMeasurement(id: UUID(), date: .now, weight: weight, impedance: impedance, bmi: bmi, bodyFat: fat, muscle: muscle, water: water, protein: protein, boneMass: bone, memberID: member.id, memberName: member.name)
+        let age = Double(member.age)
+        let validResistance = (100.0...1500.0).contains(impedance) ? impedance : nil
+
+        let baseBodyFat: Double
+        if let resistance = validResistance {
+            let heightSquared = member.height * member.height
+            var fatFreeMass: Double
+
+            if member.sex == .male {
+                fatFreeMass = 9.33285
+                    + 0.00066360 * heightSquared
+                    - 0.02117 * resistance
+                    + 0.62854 * weight
+                    - 0.12380 * age
+                let initialBodyFat = 100 * (weight - fatFreeMass) / weight
+                if initialBodyFat >= 20 {
+                    fatFreeMass = 14.52435
+                        + 0.00088580 * heightSquared
+                        - 0.02999 * resistance
+                        + 0.42688 * weight
+                        - 0.07002 * age
+                }
+            } else {
+                fatFreeMass = 10.43485
+                    + 0.00064602 * heightSquared
+                    - 0.01397 * resistance
+                    + 0.42087 * weight
+                let initialBodyFat = 100 * (weight - fatFreeMass) / weight
+                if initialBodyFat >= 30 {
+                    fatFreeMass = 9.37938
+                        + 0.00091186 * heightSquared
+                        - 0.01466 * resistance
+                        + 0.29990 * weight
+                        - 0.07012 * age
+                }
+            }
+
+            fatFreeMass = clamp(fatFreeMass, weight * 0.35, weight * 0.97)
+            baseBodyFat = 100 * (weight - fatFreeMass) / weight
+        } else {
+            let sexValue = member.sex == .male ? 1.0 : 0.0
+            baseBodyFat = 1.20 * bmi + 0.23 * age - 10.8 * sexValue - 5.4
+        }
+
+        let minimumBodyFat = member.sex == .male ? 3.0 : 8.0
+        let fat = clamp(baseBodyFat, minimumBodyFat, 60.0)
+        let bonePercent = member.sex == .male ? 4.5 : 4.0
+        let musclePercent = clamp(100.0 - fat - bonePercent, 20.0, 95.0)
+        let water = clamp((100.0 - fat) * 0.70, 25.0, 80.0)
+        let protein = clamp((100.0 - fat) * 0.238, 5.0, 35.0)
+        let bone = weight * bonePercent / 100.0
+        let muscle = weight * musclePercent / 100.0
+        return BodyMeasurement(id: UUID(), date: .now, weight: weight, impedance: impedance, bmi: bmi, bodyFat: fat, muscle: muscle, water: water, protein: protein, boneMass: bone, memberID: member.id, memberName: member.name, adcIndex: adcIndex)
+    }
+
+    private static func clamp(_ value: Double, _ lowerBound: Double, _ upperBound: Double) -> Double {
+        min(max(value, lowerBound), upperBound)
     }
 }
-
-
