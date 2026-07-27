@@ -46,7 +46,7 @@
 - 服务：`FFB0`
 - Notify 特征：`FFB2`
 
-其他型号和固件可能使用不同广播或数据格式。详细逆向记录见 [PROTOCOL.md](PROTOCOL.md)。
+其他型号和固件可能使用不同广播或数据格式。详细逆向记录见 [协议笔记](docs/PROTOCOL.md)。
 
 ## 环境要求
 
@@ -89,13 +89,16 @@ App 本身不发起网络请求，资料和历史保存在 App 沙盒中。启�
 
 ```text
 体脂秤/
-├── ContentView.swift       # SwiftUI、蓝牙协议、模型与算法
-├── HealthKitManager.swift  # Apple 健康授权和写入
-├── 体脂秤.entitlements      # HealthKit entitlement
-└── Assets.xcassets
+├── App/                    # App 入口与根界面
+├── Bluetooth/              # BLE 扫描、连接、测量状态机与协议解析
+├── Domain/                 # 数据模型、用户资料与身体指标算法
+├── Features/               # 测量、历史、配对、资料等 SwiftUI 页面
+├── Health/                 # Apple 健康授权和写入
+├── Assets.xcassets/        # 图标与颜色资源
+└── 体脂秤.entitlements      # HealthKit entitlement
+docs/
+└── PROTOCOL.md             # AFU-WL 协议逆向笔记
 ```
-
-当前代码仍以小型原型结构为主。后续适合继续拆分蓝牙、协议、算法、存储和界面模块，并为协议解析与测量会话增加独立测试 Target。
 
 ## 构建检查
 
@@ -120,6 +123,4 @@ GitHub Actions 会在 Push 和 Pull Request 时执行相同的无签名构建。
 
 ## 开源许可
 
-截至 2026-07-27，上游仓库没有提供 `LICENSE`。公开可见不等于允许复制、修改或重新分发，因此当前修改版也不能单方面给上游代码添加新的开源许可证。
-
-在公开发布或接受外部贡献前，应先取得上游作者的明确授权，或由上游作者添加开源许可证。获得授权后，本仓库会保留原作者署名，并按照上游许可证的要求发布。
+本修改版已取得上游作者授权，并按照 [GNU General Public License v3.0](LICENSE) 发布。
