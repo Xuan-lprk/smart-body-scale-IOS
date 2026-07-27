@@ -1,10 +1,10 @@
 # AFU-WL 体脂秤 iOS 客户端
 
-一个使用 SwiftUI 和 CoreBluetooth 编写的非官方客户端，用于在不注册厂商账号、不连接厂商服务器的情况下读取特定 AFU-WL / Welland 体脂秤，并可选择写入 Apple 健康。
+一个使用 SwiftUI 和 CoreBluetooth 编写的非官方客户端，用于在不连接阿里服务器的情况下读取特定 AFU-WL / Welland 体脂秤，并可选择写入 Apple 健康。
 
 > 本项目来自社区逆向研究，与蚂蚁阿福、沃莱、Fitdays、Icomon 或 Apple 没有隶属或授权关系。
 
-本修改版基于 [maoziban/smart-body-scale-IOS](https://github.com/maoziban/smart-body-scale-IOS) 开发，并保留了原仓库的 Git 提交历史。新增内容包括 HealthKit 写入、ADC 选择、与 CLI 一致的广播解析、设备身份绑定、算法与隐私说明等。
+本修改版基于 [maoziban/smart-body-scale-IOS](https://github.com/maoziban/smart-body-scale-IOS) 开发，并保留了原仓库的 Git 提交历史。新增内容包括 HealthKit 写入、ADC 选择、更稳定的广播解析、设备身份绑定、算法与隐私说明等。
 
 ## 当前功能
 
@@ -31,12 +31,20 @@
 | 体脂率 | 本地 BIA 公式估算 | 不是秤返回的官方体脂字段 |
 | 水分、肌肉、骨量、蛋白质、皮下脂肪 | 本地粗略推算 | 不能视为独立测量 |
 
-消费级四电极体脂秤适合观察同一条件下的长期趋势，不应替代医疗检查。当前 BIA 主公式参考 Segal 等人在 1988 年发表的人体成分估算公式；其研究人群主要为成人，因此儿童和青少年的结果尤其需要谨慎解读。没有有效阻抗时使用基于 BMI、年龄和性别的回退估算。
+当前 BIA 主公式参考 Segal 等人在 1988 年发表的人体成分估算公式；其研究人群主要为成人，因此儿童和青少年的结果尤其需要谨慎解读。没有有效阻抗时使用基于 BMI、年龄和性别的回退估算。
 
 公式来源：
 
 - Segal KR et al. (1988), [Lean body mass estimation by bioelectrical impedance analysis: a four-site cross-validation study](https://pubmed.ncbi.nlm.nih.gov/3337041/)
 - Deurenberg P et al. (1991), [Body mass index as a measure of body fatness: age- and sex-specific prediction formulas](https://doi.org/10.1079/BJN19910073)
+
+## 误差与限制
+
+体重为秤直接测量，ADC 为秤直接发送；阻抗来自协议换算。体脂、水分、肌肉、骨量等身体成分均为本地公式估算，不应替代医疗检查。
+
+蚂蚁阿福的身体成分结果同样属于消费级估算。可切换 ADC 1 和 ADC 2 来缩小与官方结果的差距，但“更接近官方结果”不代表“医学上更准确”（不过仍建议选择差距较小的 ADC，阿里的结果有可能更接近真实数据）。
+
+观察长期趋势时，建议固定使用同一个 ADC，并保持相似的测量条件。
 
 ## 已验证硬件
 
@@ -46,7 +54,7 @@
 - 服务：`FFB0`
 - Notify 特征：`FFB2`
 
-其他型号和固件可能使用不同广播或数据格式。详细逆向记录见 [协议笔记](docs/PROTOCOL.md)。
+其他型号和固件可能使用不同广播或数据格式。详细逆向记录见 [协议笔记](PROTOCOL.md)。
 
 ## 环境要求
 
@@ -63,7 +71,7 @@
 2. 选择 App Target，在 **Signing & Capabilities** 中选择自己的 Team。
 3. 如有需要，将 Bundle Identifier 改成自己拥有的唯一标识。
 4. 连接 iPhone 或 iPad并运行。
-5. 完全退出厂商 App 和电脑端 CLI，避免它们占用蓝牙连接。
+5. 完全退出其他设备上的蚂蚁阿福；如果秤仍被占用，可以关闭那些设备的蓝牙。不要关闭正在运行本 App 的 iPhone/iPad 蓝牙。
 6. 光脚站上秤将其唤醒，在配对页选择发现的设备。
 
 如果秤无法出现，请依次确认：
@@ -121,6 +129,6 @@ GitHub Actions 会在 Push 和 Pull Request 时执行相同的无签名构建。
 - 把估算指标描述成医疗测量；
 - 在没有对照数据时修改生产公式或默认 ADC。
 
-## 开源许可
+## 许可证
 
 本修改版已取得上游作者授权，并按照 [GNU General Public License v3.0](LICENSE) 发布。
