@@ -70,6 +70,24 @@ struct ProfileView: View {
             .onChange(of: syncBodyFat) { _ in refreshHealthAuthorization() }
             .onChange(of: syncLeanBodyMass) { _ in refreshHealthAuthorization() }
             Section {
+                NavigationLink {
+                    HealthDataSourcesView()
+                } label: {
+                    HStack {
+                        Label("查看健康数据来源", systemImage: "point.3.connected.trianglepath.dotted")
+                        Spacer()
+                        if !healthKit.sourceSummaries.isEmpty {
+                            Text("\(healthKit.sourceSummaries.count)")
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                }
+            } header: {
+                Text("跨体重秤数据")
+            } footer: {
+                Text("识别 Apple 健康中的体重和体脂数据来自哪些 App，为后续去重、跨秤对比和异常提示打基础。")
+            }
+            Section {
                 ForEach(profile.members) { member in
                     HStack { Image(systemName: "person.crop.circle").foregroundStyle(.teal); Text(member.name); Spacer(); Text(member.sex == .female ? "女" : "男").font(.caption).foregroundStyle(.secondary) }
                 }

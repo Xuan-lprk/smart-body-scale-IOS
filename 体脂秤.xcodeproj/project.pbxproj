@@ -262,7 +262,7 @@
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_NSBluetoothAlwaysUsageDescription = "需要使用蓝牙连接体脂秤以传输体重及体脂测量数据。";
 				INFOPLIST_KEY_NSBluetoothPeripheralUsageDescription = "需要使用蓝牙连接体脂秤以传输体重及体脂测量数据。";
-				INFOPLIST_KEY_NSHealthShareUsageDescription = "用于确认本 App 写入 Apple 健康的身体测量记录。";
+				INFOPLIST_KEY_NSHealthShareUsageDescription = "读取体重、BMI、体脂率和去脂体重，用于在本机识别记录来自哪些体重秤或 App，并进行来源对比。";
 				INFOPLIST_KEY_NSHealthUpdateUsageDescription = "将本人测得的体重及选择的身体成分估算值写入 Apple 健康。";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
@@ -300,7 +300,7 @@
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_NSBluetoothAlwaysUsageDescription = "需要使用蓝牙连接体脂秤以传输体重及体脂测量数据。";
 				INFOPLIST_KEY_NSBluetoothPeripheralUsageDescription = "需要使用蓝牙连接体脂秤以传输体重及体脂测量数据。";
-				INFOPLIST_KEY_NSHealthShareUsageDescription = "用于确认本 App 写入 Apple 健康的身体测量记录。";
+				INFOPLIST_KEY_NSHealthShareUsageDescription = "读取体重、BMI、体脂率和去脂体重，用于在本机识别记录来自哪些体重秤或 App，并进行来源对比。";
 				INFOPLIST_KEY_NSHealthUpdateUsageDescription = "将本人测得的体重及选择的身体成分估算值写入 Apple 健康。";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;

@@ -2,6 +2,49 @@ import Foundation
 import HealthKit
 import Combine
 
+enum HealthBodyMetric: String, CaseIterable, Hashable {
+    case weight
+    case bmi
+    case bodyFat
+    case leanBodyMass
+
+    var title: String {
+        switch self {
+        case .weight: "体重"
+        case .bmi: "BMI"
+        case .bodyFat: "体脂率"
+        case .leanBodyMass: "去脂体重"
+        }
+    }
+
+    var typeIdentifier: HKQuantityTypeIdentifier {
+        switch self {
+        case .weight: .bodyMass
+        case .bmi: .bodyMassIndex
+        case .bodyFat: .bodyFatPercentage
+        case .leanBodyMass: .leanBodyMass
+        }
+    }
+}
+
+struct HealthDataSourceSummary: Identifiable {
+    let id: String
+    let name: String
+    let bundleIdentifier: String
+    let providerName: String
+    let isCurrentApp: Bool
+    var metrics: Set<HealthBodyMetric>
+    var latestDate: Date
+    var sampleCount: Int
+
+    var metricText: String {
+        HealthBodyMetric.allCases
+            .filter(metrics.contains)
+            .map(\.title)
+            .joined(separator: "、")
+    }
+}
+
 @MainActor
 final class HealthKitManager: ObservableObject {
     static let enabledKey = "afu.health.enabled"
@@ -12,8 +55,12 @@ final class HealthKitManager: ObservableObject {
 
     @Published private(set) var statusText = "尚未连接 Apple 健康"
     @Published private(set) var lastSyncText: String?
+    @Published private(set) var sourceSummaries: [HealthDataSourceSummary] = []
+    @Published private(set) var sourceStatusText = "尚未扫描 Apple 健康数据来源"
+    @Published private(set) var isScanningSources = false
 
     private let healthStore = HKHealthStore()
+    private let sourceSampleLimit = 200
 
     init() {
         UserDefaults.standard.register(defaults: [
@@ -36,13 +83,13 @@ final class HealthKitManager: ObservableObject {
             return
         }
 
-        let types = enabledWriteTypes()
-        guard !types.isEmpty else {
+        let writeTypes = enabledWriteTypes()
+        guard !writeTypes.isEmpty else {
             statusText = "请至少选择一个同步项目"
             return
         }
 
-        healthStore.requestAuthorization(toShare: types, read: []) { [weak self] success, error in
+        healthStore.requestAuthorization(toShare: writeTypes, read: readableBodyTypes()) { [weak self] success, error in
             guard let manager = self else { return }
             let message = success
                 ? "已请求 Apple 健康写入权限"
@@ -50,6 +97,86 @@ final class HealthKitManager: ObservableObject {
             Task { @MainActor in
                 manager.statusText = message
             }
+        }
+    }
+
+    func requestDataSourceAccess() {
+        guard isAvailable else {
+            sourceStatusText = "此设备不支持 Apple 健康"
+            return
+        }
+
+        healthStore.requestAuthorization(toShare: [], read: readableBodyTypes()) { [weak self] success, error in
+            guard let manager = self else { return }
+            Task { @MainActor in
+                if success {
+                    manager.refreshDataSources()
+                } else {
+                    manager.sourceStatusText = error?.localizedDescription ?? "未获得 Apple 健康读取权限"
+                }
+            }
+        }
+    }
+
+    func refreshDataSources() {
+        guard isAvailable, !isScanningSources else { return }
+
+        isScanningSources = true
+        sourceStatusText = "正在检查最近一年的身体测量记录…"
+
+        Task { [weak self] in
+            guard let manager = self else { return }
+            do {
+                var summaries: [String: HealthDataSourceSummary] = [:]
+
+                for metric in HealthBodyMetric.allCases {
+                    guard let type = HKQuantityType.quantityType(forIdentifier: metric.typeIdentifier) else {
+                        continue
+                    }
+                    let samples = try await manager.recentSamples(for: type)
+                    for sample in samples {
+                        let source = sample.sourceRevision.source
+                        let bundleIdentifier = source.bundleIdentifier
+                        let key = bundleIdentifier
+                        let currentBundleIdentifier = Bundle.main.bundleIdentifier
+
+                        if var existing = summaries[key] {
+                            existing.metrics.insert(metric)
+                            existing.latestDate = max(existing.latestDate, sample.endDate)
+                            existing.sampleCount += 1
+                            summaries[key] = existing
+                        } else {
+                            summaries[key] = HealthDataSourceSummary(
+                                id: key,
+                                name: source.name,
+                                bundleIdentifier: bundleIdentifier,
+                                providerName: Self.providerName(
+                                    sourceName: source.name,
+                                    bundleIdentifier: bundleIdentifier
+                                ),
+                                isCurrentApp: bundleIdentifier == currentBundleIdentifier,
+                                metrics: [metric],
+                                latestDate: sample.endDate,
+                                sampleCount: 1
+                            )
+                        }
+                    }
+                }
+
+                manager.sourceSummaries = summaries.values.sorted {
+                    if $0.isCurrentApp != $1.isCurrentApp {
+                        return $0.isCurrentApp
+                    }
+                    return $0.latestDate > $1.latestDate
+                }
+                manager.sourceStatusText = manager.sourceSummaries.isEmpty
+                    ? "没有读到记录。请在“健康”中确认已允许本 App 读取身体测量数据。"
+                    : "发现 \(manager.sourceSummaries.count) 个数据来源"
+            } catch {
+                manager.sourceSummaries = []
+                manager.sourceStatusText = "读取失败：\(error.localizedDescription)"
+            }
+            manager.isScanningSources = false
         }
     }
 
@@ -120,6 +247,61 @@ final class HealthKitManager: ObservableObject {
             types.insert(type)
         }
         return types
+    }
+
+    private func readableBodyTypes() -> Set<HKObjectType> {
+        Set(HealthBodyMetric.allCases.compactMap {
+            HKQuantityType.quantityType(forIdentifier: $0.typeIdentifier)
+        })
+    }
+
+    private func recentSamples(for type: HKQuantityType) async throws -> [HKQuantitySample] {
+        let startDate = Calendar.current.date(byAdding: .year, value: -1, to: .now)
+        let predicate = HKQuery.predicateForSamples(
+            withStart: startDate,
+            end: .now,
+            options: .strictEndDate
+        )
+        let sort = NSSortDescriptor(key: HKSampleSortIdentifierEndDate, ascending: false)
+
+        return try await withCheckedThrowingContinuation { continuation in
+            let query = HKSampleQuery(
+                sampleType: type,
+                predicate: predicate,
+                limit: sourceSampleLimit,
+                sortDescriptors: [sort]
+            ) { _, samples, error in
+                if let error {
+                    continuation.resume(throwing: error)
+                    return
+                }
+                continuation.resume(returning: samples as? [HKQuantitySample] ?? [])
+            }
+            healthStore.execute(query)
+        }
+    }
+
+    private static func providerName(sourceName: String, bundleIdentifier: String) -> String {
+        let value = "\(sourceName) \(bundleIdentifier)".lowercased()
+        let providers: [(needles: [String], name: String)] = [
+            (["huawei"], "华为"),
+            (["xiaomi", "mijia", "mi home"], "小米"),
+            (["withings", "health mate"], "Withings"),
+            (["garmin"], "Garmin"),
+            (["renpho"], "RENPHO"),
+            (["eufy"], "Eufy"),
+            (["inbody"], "InBody"),
+            (["omron"], "欧姆龙"),
+            (["fitbit", "google health"], "Fitbit / Google"),
+            (["fitdays"], "Fitdays"),
+            (["okok"], "OKOK"),
+            (["feelfit"], "Feelfit"),
+            (["ailink"], "AiLink")
+        ]
+
+        return providers.first(where: { provider in
+            provider.needles.contains(where: value.contains)
+        })?.name ?? sourceName
     }
 
     private func makeSamples(for measurement: BodyMeasurement) -> [HKQuantitySample] {
