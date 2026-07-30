@@ -20,12 +20,16 @@ enum ConnectionState: Equatable { case bluetoothOff, idle, scanning, connecting,
     private var activePeripheral: CBPeripheral?
     weak var profile: UserProfile?
     weak var healthKit: HealthKitManager?
+    weak var comparisonStore: ComparisonStore?
     @Published var connectionState: ConnectionState = .idle
     @Published var discoveredDevices: [DiscoveredScale] = []
     @Published var liveWeight = 0.0
     @Published var impedance = 0.0
     @Published var selectedADCIndex: Int?
+    @Published private(set) var rawADCs: [Double] = []
+    @Published private(set) var normalizedImpedances: [Double] = []
     @Published var currentMeasurement: BodyMeasurement?
+    @Published var reviewMeasurement: BodyMeasurement?
     @Published var history: [BodyMeasurement] = []
     @Published var deviceName: String?
     @Published var isScanning = false
@@ -91,7 +95,6 @@ enum ConnectionState: Equatable { case bluetoothOff, idle, scanning, connecting,
         deviceName = nil
         discoveredDevices = []
     }
-    func removeHistory(at offsets: IndexSet) { history.remove(atOffsets: offsets); saveHistory() }
     private func finishMeasurement() {
         guard liveWeight > 0, let profile else { return }
         guard !hasSavedMeasurement else { return }
@@ -102,9 +105,12 @@ enum ConnectionState: Equatable { case bluetoothOff, idle, scanning, connecting,
             weight: liveWeight,
             impedance: impedance,
             member: member,
-            adcIndex: selectedADCIndex
+            adcIndex: selectedADCIndex,
+            rawADCs: rawADCs,
+            normalizedImpedances: normalizedImpedances
         )
         currentMeasurement = measurement
+        reviewMeasurement = measurement
         history.insert(measurement, at: 0)
         if isNewMember && unrecognizedWeight == nil { unrecognizedWeight = liveWeight }
         saveHistory()
@@ -114,10 +120,55 @@ enum ConnectionState: Equatable { case bluetoothOff, idle, scanning, connecting,
         }
         log("[BLE] Stored stable measurement: weight=\(liveWeight) kg, impedance=\(impedance) Ohm")
     }
+    func dismissReview(for measurementID: UUID) {
+        if reviewMeasurement?.id == measurementID {
+            reviewMeasurement = nil
+        }
+    }
+    func deleteMeasurement(_ measurement: BodyMeasurement) async -> String? {
+        do {
+            _ = try await healthKit?.delete(measurement)
+        } catch {
+            log("[HealthKit] Failed to delete measurement \(measurement.id): \(error.localizedDescription)")
+            return "Apple 健康删除失败：\(error.localizedDescription)。本地记录仍保留，避免留下无法追踪的健康数据。"
+        }
+
+        history.removeAll { $0.id == measurement.id }
+        if currentMeasurement?.id == measurement.id {
+            currentMeasurement = nil
+        }
+        if reviewMeasurement?.id == measurement.id {
+            reviewMeasurement = nil
+        }
+        comparisonStore?.removeReferences(for: measurement.id)
+        saveHistory()
+        log("[History] Deleted local measurement and linked HealthKit samples: \(measurement.id)")
+        return nil
+    }
+    @discardableResult
+    func mergeRestoredHistory(_ measurements: [BodyMeasurement]) -> Int {
+        let existingIDs = Set(history.map(\.id))
+        let additions = measurements.filter { !existingIDs.contains($0.id) }
+        guard !additions.isEmpty else { return 0 }
+        history.append(contentsOf: additions)
+        history.sort { $0.date > $1.date }
+        saveHistory()
+        log("[History] Restored \(additions.count) measurements from HealthKit archive")
+        return additions.count
+    }
     func clearUnrecognizedWeight() { unrecognizedWeight = nil }
     func assignUnrecognizedMeasurement(to member: FamilyMember) {
         guard let measurement = currentMeasurement, let index = history.firstIndex(where: { $0.id == measurement.id }) else { return }
-        let updated = BodyMeasurement(id: measurement.id, date: measurement.date, weight: measurement.weight, impedance: measurement.impedance, bmi: measurement.bmi, bodyFat: measurement.bodyFat, muscle: measurement.muscle, water: measurement.water, protein: measurement.protein, boneMass: measurement.boneMass, memberID: member.id, memberName: member.name, adcIndex: measurement.adcIndex)
+        let updated = BodyAlgorithm.measure(
+            id: measurement.id,
+            date: measurement.date,
+            weight: measurement.weight,
+            impedance: measurement.impedance,
+            member: member,
+            adcIndex: measurement.adcIndex,
+            rawADCs: measurement.rawADCs,
+            normalizedImpedances: measurement.normalizedImpedances
+        )
         currentMeasurement = updated; history[index] = updated; saveHistory()
     }
     private func saveHistory() { if let data = try? JSONEncoder().encode(history) { UserDefaults.standard.set(data, forKey: "afu.scale.history") } }
@@ -206,6 +257,8 @@ extension ScaleManager: @preconcurrency CBCentralManagerDelegate, @preconcurrenc
         liveWeight = 0.0
         impedance = 0.0
         selectedADCIndex = nil
+        rawADCs = []
+        normalizedImpedances = []
         isStable = false
         isMeasuring = false
         hasSavedMeasurement = false
@@ -333,6 +386,8 @@ extension ScaleManager: @preconcurrency CBCentralManagerDelegate, @preconcurrenc
             if liveWeight < 1.0 || (!wasMeasuring && isMeasuring && !hasSavedMeasurement) {
                 impedance = 0
                 selectedADCIndex = nil
+                rawADCs = []
+                normalizedImpedances = []
             }
             // 稳定包之后的短暂波动仍属于同一次上秤；只有离秤才解锁下一条记录。
             if liveWeight < 1.0 {
@@ -346,6 +401,8 @@ extension ScaleManager: @preconcurrency CBCentralManagerDelegate, @preconcurrenc
         case .impedance:
             let packetWeight = packet.adcWeight > 0 ? packet.adcWeight : liveWeight
             let normalized = AFUPacket.normalizeImpedances(packet.adcs, weight: packetWeight)
+            rawADCs = packet.adcs
+            normalizedImpedances = normalized
             let preferredIndex = UserDefaults.standard.integer(forKey: ImpedanceADCChoice.storageKey)
             let preferredValue = normalized.indices.contains(preferredIndex) ? normalized[preferredIndex] : nil
             if let preferredValue, (100.0...1500.0).contains(preferredValue) {

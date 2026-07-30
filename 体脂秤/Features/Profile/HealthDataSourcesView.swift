@@ -30,7 +30,55 @@ struct HealthDataSourcesView: View {
                     .foregroundStyle(healthKit.sourceSummaries.isEmpty ? Color.secondary : Color.green)
                 }
             } footer: {
-                Text("只检查最近一年、每项最多 200 条身体测量记录。数据来源分析在本机完成，不会上传健康数据。")
+                Text("只检查最近一年、每项最多 200 条身体测量记录。来源识别和重复检测均在本机完成，不会上传健康数据。")
+            }
+
+            if !healthKit.duplicateWeightGroups.isEmpty {
+                Section {
+                    ForEach(healthKit.duplicateWeightGroups.prefix(10)) { group in
+                        VStack(alignment: .leading, spacing: 10) {
+                            HStack {
+                                Label(
+                                    "\(group.averageWeightKilograms, specifier: "%.2f") kg",
+                                    systemImage: "exclamationmark.triangle.fill"
+                                )
+                                .fontWeight(.semibold)
+                                .foregroundStyle(.orange)
+                                Spacer()
+                                Text(group.date, format: .dateTime.month().day().hour().minute())
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+
+                            Text(group.sourceText)
+                                .font(.callout)
+
+                            ForEach(group.samples) { sample in
+                                HStack {
+                                    Circle()
+                                        .fill(.blue.opacity(0.7))
+                                        .frame(width: 6, height: 6)
+                                    Text(sample.sourceName)
+                                        .lineLimit(1)
+                                    Spacer()
+                                    Text("\(sample.weightKilograms, specifier: "%.2f") kg")
+                                    Text(sample.date, format: .dateTime.hour().minute().second())
+                                }
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                            }
+
+                            Text("时间跨度 \(group.timeSpanMinutes, specifier: "%.1f") 分钟 · 体重范围 \(group.weightSpreadKilograms, specifier: "%.2f") kg")
+                            .font(.caption2)
+                            .foregroundStyle(.tertiary)
+                        }
+                        .padding(.vertical, 4)
+                    }
+                } header: {
+                    Text("可能重复的称重")
+                } footer: {
+                    Text("判定规则：不同 App 在 5 分钟内写入、体重相差不超过 0.1 kg。这里只提示，不会删除或修改 Apple 健康记录。最多显示最近 10 组。")
+                }
             }
 
             if !healthKit.sourceSummaries.isEmpty {

@@ -6,6 +6,8 @@
 
 本修改版基于 [maoziban/smart-body-scale-IOS](https://github.com/maoziban/smart-body-scale-IOS) 开发，并保留了原仓库的 Git 提交历史。新增内容包括 HealthKit 写入、ADC 选择、更稳定的广播解析、设备身份绑定、算法与隐私说明等。
 
+项目长期宗旨见 [VISION.md](VISION.md)，后续产品方向和待确认问题见 [ROADMAP.md](ROADMAP.md)，版本变化见 [CHANGELOG.md](CHANGELOG.md)。
+
 ## 当前功能
 
 - 扫描并连接 `AFU-WL-TZ-A1`、`subtype=7` 的已验证设备；
@@ -18,6 +20,8 @@
   - BMI；
   - 体脂率；
   - 去脂体重；
+- 可读取 Apple 健康中最近一年的身体测量记录，识别来源 App；
+- 提示不同 App 在短时间内写入的疑似重复体重，不自动删除数据；
 - 不包含账号、广告、网络请求或第三方统计 SDK。
 
 ## 数据分别来自哪里
@@ -87,6 +91,8 @@
 
 体重属于直接测量；BMI、体脂率和去脂体重包含本地公式计算。HealthKit 样本会携带算法版本、阻抗和 ADC 编号等元数据，用于之后追溯。
 
+在“我的资料 → 跨体重秤数据”中，可以授权读取体重、BMI、体脂率和去脂体重，查看记录来自哪个 App。疑似重复规则为：不同来源在 5 分钟内写入、体重相差不超过 0.1 kg。检测只作提示，不会修改 Apple 健康。
+
 ## 隐私
 
 App 本身不发起网络请求，资料和历史保存在 App 沙盒中。启用 Apple 健康后，所选数据会交给 HealthKit，是否通过 iCloud 同步由用户的系统设置决定。完整说明见 [PRIVACY.md](PRIVACY.md)。
@@ -101,7 +107,7 @@ App 本身不发起网络请求，资料和历史保存在 App 沙盒中。启�
 ├── Bluetooth/              # BLE 扫描、连接、测量状态机与协议解析
 ├── Domain/                 # 数据模型、用户资料与身体指标算法
 ├── Features/               # 测量、历史、配对、资料等 SwiftUI 页面
-├── Health/                 # Apple 健康授权和写入
+├── AppleHealth/            # Apple 健康授权、写入、来源识别与重复检测
 ├── Assets.xcassets/        # 图标与颜色资源
 └── 体脂秤.entitlements      # HealthKit entitlement
 docs/

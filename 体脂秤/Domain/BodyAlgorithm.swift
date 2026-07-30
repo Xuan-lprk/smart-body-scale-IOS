@@ -1,11 +1,17 @@
 import Foundation
 
 @MainActor enum BodyAlgorithm {
+    static let version = "segal_1988_v1"
+
     static func measure(
+        id: UUID = UUID(),
+        date: Date = .now,
         weight: Double,
         impedance: Double,
         member: FamilyMember,
-        adcIndex: Int? = nil
+        adcIndex: Int? = nil,
+        rawADCs: [Double]? = nil,
+        normalizedImpedances: [Double]? = nil
     ) -> BodyMeasurement {
         let heightM = member.height / 100
         let bmi = weight / (heightM * heightM)
@@ -61,7 +67,25 @@ import Foundation
         let protein = clamp((100.0 - fat) * 0.238, 5.0, 35.0)
         let bone = weight * bonePercent / 100.0
         let muscle = weight * musclePercent / 100.0
-        return BodyMeasurement(id: UUID(), date: .now, weight: weight, impedance: impedance, bmi: bmi, bodyFat: fat, muscle: muscle, water: water, protein: protein, boneMass: bone, memberID: member.id, memberName: member.name, adcIndex: adcIndex)
+        return BodyMeasurement(
+            id: id,
+            date: date,
+            weight: weight,
+            impedance: impedance,
+            bmi: bmi,
+            bodyFat: fat,
+            muscle: muscle,
+            water: water,
+            protein: protein,
+            boneMass: bone,
+            memberID: member.id,
+            memberName: member.name,
+            adcIndex: adcIndex,
+            rawADCs: rawADCs,
+            normalizedImpedances: normalizedImpedances,
+            profileSnapshot: MeasurementProfileSnapshot(member: member),
+            algorithmVersion: version
+        )
     }
 
     private static func clamp(_ value: Double, _ lowerBound: Double, _ upperBound: Double) -> Double {

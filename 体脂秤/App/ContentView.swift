@@ -4,6 +4,7 @@ struct ContentView: View {
     @EnvironmentObject private var scale: ScaleManager
     @EnvironmentObject private var profile: UserProfile
     @EnvironmentObject private var healthKit: HealthKitManager
+    @EnvironmentObject private var comparisonStore: ComparisonStore
     @State private var tab = 0
     @AppStorage("afu.hasPairedScale") private var hasPairedScale = false
     @AppStorage("afu.family.hasPromptedInitial") private var hasPromptedInitial = false
@@ -28,6 +29,10 @@ struct ContentView: View {
         .onAppear {
             scale.profile = profile
             scale.healthKit = healthKit
+            scale.comparisonStore = comparisonStore
+            healthKit.onMeasurementsRecovered = { measurements in
+                scale.mergeRestoredHistory(measurements)
+            }
         }
         .onAppear { promptForInitialMemberIfNeeded() }
         .onChange(of: hasPairedScale) { _ in promptForInitialMemberIfNeeded() }
@@ -56,6 +61,9 @@ struct ContentView: View {
                 hasPromptedInitial = true
             }
         }
+        .sheet(item: $scale.reviewMeasurement) { measurement in
+            MeasurementReviewView(measurement: measurement)
+        }
     }
 
     private func promptForInitialMemberIfNeeded() {
@@ -68,4 +76,5 @@ struct ContentView: View {
         .environmentObject(ScaleManager())
         .environmentObject(UserProfile())
         .environmentObject(HealthKitManager())
+        .environmentObject(ComparisonStore())
 }

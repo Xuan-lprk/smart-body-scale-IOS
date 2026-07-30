@@ -52,6 +52,19 @@ struct ProfileView: View {
                     healthKit.requestAuthorization()
                 }
                 .disabled(!healthSyncEnabled)
+                Button {
+                    healthKit.requestMeasurementRecovery()
+                } label: {
+                    if healthKit.isRecoveringMeasurements {
+                        HStack {
+                            ProgressView()
+                            Text("正在恢复本地记录…")
+                        }
+                    } else {
+                        Label("从 Apple 健康恢复本地记录", systemImage: "arrow.down.doc")
+                    }
+                }
+                .disabled(healthKit.isRecoveringMeasurements)
                 Label(healthKit.statusText, systemImage: "heart.text.square")
                     .font(.caption)
                     .foregroundStyle(.secondary)
@@ -60,10 +73,15 @@ struct ProfileView: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
+                if let recoveryStatusText = healthKit.recoveryStatusText {
+                    Text(recoveryStatusText)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
             } header: {
                 Text("Apple 健康")
             } footer: {
-                Text("只自动同步归属于“本人”的实时测量。体重为直接测量；BMI、体脂率和去脂体重包含公式估算。历史包和家庭成员不会自动写入。")
+                Text("只自动同步归属于“本人”的实时测量。新写入的健康样本会携带本 App 的完整测量档案；重装后使用相同 Bundle ID 并重新授权，可恢复双 ADC 本地历史。历史包和家庭成员不会自动写入。")
             }
             .onChange(of: syncWeight) { _ in refreshHealthAuthorization() }
             .onChange(of: syncBMI) { _ in refreshHealthAuthorization() }
@@ -79,6 +97,11 @@ struct ProfileView: View {
                         if !healthKit.sourceSummaries.isEmpty {
                             Text("\(healthKit.sourceSummaries.count)")
                                 .foregroundStyle(.secondary)
+                        }
+                        if !healthKit.duplicateWeightGroups.isEmpty {
+                            Text("\(healthKit.duplicateWeightGroups.count) 组重复")
+                                .font(.caption)
+                                .foregroundStyle(.orange)
                         }
                     }
                 }
@@ -98,7 +121,7 @@ struct ProfileView: View {
             } footer: {
                 Text("测量完成后会按成员近期体重和参考体重自动归属记录。")
             }
-            Section("说明") { Text("所有测量记录仅保存在本机。体脂率为健康参考数据，不替代医疗诊断。") }
+            Section("说明") { Text("本地历史保存在 App 容器内，卸载 App 会清除；开启 Apple 健康同步后，新测量可从健康样本中的本 App 档案恢复。体脂率为健康参考数据，不替代医疗诊断。") }
             Section("调试日志") {
                 Button("清空日志", role: .destructive) { scale.clearDebugLogs() }
                 if scale.debugLogs.isEmpty {

@@ -45,6 +45,54 @@ struct HealthDataSourceSummary: Identifiable {
     }
 }
 
+struct HealthWeightSampleSummary: Identifiable {
+    let id: UUID
+    let date: Date
+    let weightKilograms: Double
+    let sourceName: String
+    let providerName: String
+    let bundleIdentifier: String
+}
+
+struct HealthDuplicateWeightGroup: Identifiable {
+    let id: UUID
+    let samples: [HealthWeightSampleSummary]
+
+    var date: Date {
+        samples.map(\.date).max() ?? .distantPast
+    }
+
+    var averageWeightKilograms: Double {
+        guard !samples.isEmpty else { return 0 }
+        return samples.map(\.weightKilograms).reduce(0, +) / Double(samples.count)
+    }
+
+    var weightSpreadKilograms: Double {
+        guard let minimum = samples.map(\.weightKilograms).min(),
+              let maximum = samples.map(\.weightKilograms).max() else {
+            return 0
+        }
+        return maximum - minimum
+    }
+
+    var timeSpanMinutes: Double {
+        guard let earliest = samples.map(\.date).min(),
+              let latest = samples.map(\.date).max() else {
+            return 0
+        }
+        return latest.timeIntervalSince(earliest) / 60.0
+    }
+
+    var sourceText: String {
+        var seen = Set<String>()
+        return samples.compactMap { sample in
+            guard seen.insert(sample.sourceName).inserted else { return nil }
+            return sample.sourceName
+        }
+        .joined(separator: " ↔ ")
+    }
+}
+
 @MainActor
 final class HealthKitManager: ObservableObject {
     static let enabledKey = "afu.health.enabled"
@@ -52,15 +100,24 @@ final class HealthKitManager: ObservableObject {
     static let bmiKey = "afu.health.bmi"
     static let bodyFatKey = "afu.health.bodyFat"
     static let leanBodyMassKey = "afu.health.leanBodyMass"
+    private static let archiveMetadataKey = "xuanlprk.measurementArchiveV1"
 
     @Published private(set) var statusText = "尚未连接 Apple 健康"
     @Published private(set) var lastSyncText: String?
     @Published private(set) var sourceSummaries: [HealthDataSourceSummary] = []
+    @Published private(set) var duplicateWeightGroups: [HealthDuplicateWeightGroup] = []
     @Published private(set) var sourceStatusText = "尚未扫描 Apple 健康数据来源"
     @Published private(set) var isScanningSources = false
+    @Published private(set) var recoveryStatusText: String?
+    @Published private(set) var isRecoveringMeasurements = false
+
+    var onMeasurementsRecovered: (([BodyMeasurement]) -> Int)?
 
     private let healthStore = HKHealthStore()
+    private var pendingSaveTasks: [UUID: Task<Void, Never>] = [:]
     private let sourceSampleLimit = 200
+    private static let duplicateTimeWindow: TimeInterval = 5 * 60
+    private static let duplicateWeightToleranceKilograms = 0.1
 
     init() {
         UserDefaults.standard.register(defaults: [
@@ -96,6 +153,26 @@ final class HealthKitManager: ObservableObject {
                 : (error?.localizedDescription ?? "未获得 Apple 健康权限")
             Task { @MainActor in
                 manager.statusText = message
+                if success {
+                    await manager.restoreMeasurementsFromHealth()
+                }
+            }
+        }
+    }
+
+    func requestMeasurementRecovery() {
+        guard isAvailable else {
+            recoveryStatusText = "此设备不支持 Apple 健康"
+            return
+        }
+        healthStore.requestAuthorization(toShare: [], read: readableBodyTypes()) { [weak self] success, error in
+            guard let manager = self else { return }
+            Task { @MainActor in
+                if success {
+                    await manager.restoreMeasurementsFromHealth()
+                } else {
+                    manager.recoveryStatusText = error?.localizedDescription ?? "未获得 Apple 健康读取权限"
+                }
             }
         }
     }
@@ -128,6 +205,7 @@ final class HealthKitManager: ObservableObject {
             guard let manager = self else { return }
             do {
                 var summaries: [String: HealthDataSourceSummary] = [:]
+                var weightSamples: [HealthWeightSampleSummary] = []
 
                 for metric in HealthBodyMetric.allCases {
                     guard let type = HKQuantityType.quantityType(forIdentifier: metric.typeIdentifier) else {
@@ -139,6 +217,23 @@ final class HealthKitManager: ObservableObject {
                         let bundleIdentifier = source.bundleIdentifier
                         let key = bundleIdentifier
                         let currentBundleIdentifier = Bundle.main.bundleIdentifier
+                        let providerName = Self.providerName(
+                            sourceName: source.name,
+                            bundleIdentifier: bundleIdentifier
+                        )
+
+                        if metric == .weight {
+                            weightSamples.append(HealthWeightSampleSummary(
+                                id: sample.uuid,
+                                date: sample.endDate,
+                                weightKilograms: sample.quantity.doubleValue(
+                                    for: .gramUnit(with: .kilo)
+                                ),
+                                sourceName: source.name,
+                                providerName: providerName,
+                                bundleIdentifier: bundleIdentifier
+                            ))
+                        }
 
                         if var existing = summaries[key] {
                             existing.metrics.insert(metric)
@@ -150,10 +245,7 @@ final class HealthKitManager: ObservableObject {
                                 id: key,
                                 name: source.name,
                                 bundleIdentifier: bundleIdentifier,
-                                providerName: Self.providerName(
-                                    sourceName: source.name,
-                                    bundleIdentifier: bundleIdentifier
-                                ),
+                                providerName: providerName,
                                 isCurrentApp: bundleIdentifier == currentBundleIdentifier,
                                 metrics: [metric],
                                 latestDate: sample.endDate,
@@ -167,13 +259,18 @@ final class HealthKitManager: ObservableObject {
                     if $0.isCurrentApp != $1.isCurrentApp {
                         return $0.isCurrentApp
                     }
-                    return $0.latestDate > $1.latestDate
-                }
+                        return $0.latestDate > $1.latestDate
+                    }
+                manager.duplicateWeightGroups = Self.detectDuplicateWeightGroups(in: weightSamples)
                 manager.sourceStatusText = manager.sourceSummaries.isEmpty
                     ? "没有读到记录。请在“健康”中确认已允许本 App 读取身体测量数据。"
-                    : "发现 \(manager.sourceSummaries.count) 个数据来源"
+                    : Self.sourceStatus(
+                        sourceCount: manager.sourceSummaries.count,
+                        duplicateCount: manager.duplicateWeightGroups.count
+                    )
             } catch {
                 manager.sourceSummaries = []
+                manager.duplicateWeightGroups = []
                 manager.sourceStatusText = "读取失败：\(error.localizedDescription)"
             }
             manager.isScanningSources = false
@@ -189,21 +286,50 @@ final class HealthKitManager: ObservableObject {
             return
         }
 
-        let syncDate = measurement.date
-        healthStore.save(samples) { [weak self] success, error in
+        let measurementID = measurement.id
+        let task = Task { [weak self] in
             guard let manager = self else { return }
-            let errorMessage = error?.localizedDescription ?? "写入 Apple 健康失败"
-            Task { @MainActor in
-                if success {
-                    let formatter = DateFormatter()
-                    formatter.dateFormat = "MM-dd HH:mm"
-                    manager.lastSyncText = "最近同步：\(formatter.string(from: syncDate))"
-                    manager.statusText = "已写入 Apple 健康"
-                } else {
-                    manager.statusText = errorMessage
-                }
+            defer { manager.pendingSaveTasks[measurementID] = nil }
+
+            do {
+                try await manager.saveSamples(samples)
+                let formatter = DateFormatter()
+                formatter.dateFormat = "MM-dd HH:mm"
+                manager.lastSyncText = "最近同步：\(formatter.string(from: measurement.date))"
+                manager.statusText = "已写入 Apple 健康"
+            } catch {
+                manager.statusText = error.localizedDescription
             }
         }
+        pendingSaveTasks[measurementID] = task
+    }
+
+    func delete(_ measurement: BodyMeasurement) async throws -> Int {
+        guard isAvailable else { return 0 }
+        if let pendingSaveTask = pendingSaveTasks[measurement.id] {
+            await pendingSaveTask.value
+        }
+        var deletedCount = 0
+
+        for metric in HealthBodyMetric.allCases {
+            guard let type = HKQuantityType.quantityType(forIdentifier: metric.typeIdentifier) else {
+                continue
+            }
+            let syncIdentifier = Self.syncIdentifier(
+                measurementID: measurement.id,
+                metric: metric.syncMetricName
+            )
+            let predicate = HKQuery.predicateForObjects(
+                withMetadataKey: HKMetadataKeySyncIdentifier,
+                allowedValues: [syncIdentifier]
+            )
+            deletedCount += try await deleteObjects(of: type, predicate: predicate)
+        }
+
+        statusText = deletedCount > 0
+            ? "已从 Apple 健康删除 \(deletedCount) 条关联数据"
+            : "Apple 健康中没有这次测量的关联数据"
+        return deletedCount
     }
 
     func refreshStatus() {
@@ -281,6 +407,97 @@ final class HealthKitManager: ObservableObject {
         }
     }
 
+    private func restoreMeasurementsFromHealth() async {
+        guard !isRecoveringMeasurements else { return }
+        isRecoveringMeasurements = true
+        recoveryStatusText = "正在从 Apple 健康恢复本 App 档案…"
+
+        do {
+            var recoveredByID: [UUID: BodyMeasurement] = [:]
+            for metric in HealthBodyMetric.allCases {
+                guard let type = HKQuantityType.quantityType(forIdentifier: metric.typeIdentifier) else {
+                    continue
+                }
+                let samples = try await archivedSamples(for: type)
+                for sample in samples {
+                    guard sample.sourceRevision.source.bundleIdentifier == Bundle.main.bundleIdentifier,
+                          let archive = sample.metadata?[Self.archiveMetadataKey] as? String,
+                          let data = archive.data(using: .utf8),
+                          let measurement = try? JSONDecoder().decode(BodyMeasurement.self, from: data) else {
+                        continue
+                    }
+                    recoveredByID[measurement.id] = measurement
+                }
+            }
+
+            let measurements = recoveredByID.values.sorted { $0.date > $1.date }
+            let importedCount = onMeasurementsRecovered?(measurements) ?? 0
+            if measurements.isEmpty {
+                recoveryStatusText = "Apple 健康中没有找到可恢复的本 App 完整档案"
+            } else if importedCount == 0 {
+                recoveryStatusText = "本地记录已经完整，无需重复恢复"
+            } else {
+                recoveryStatusText = "已从 Apple 健康恢复 \(importedCount) 条本地记录"
+            }
+        } catch {
+            recoveryStatusText = "恢复失败：\(error.localizedDescription)"
+        }
+        isRecoveringMeasurements = false
+    }
+
+    private func archivedSamples(for type: HKQuantityType) async throws -> [HKQuantitySample] {
+        let predicate = HKQuery.predicateForObjects(withMetadataKey: Self.archiveMetadataKey)
+        let sort = NSSortDescriptor(key: HKSampleSortIdentifierEndDate, ascending: false)
+
+        return try await withCheckedThrowingContinuation { continuation in
+            let query = HKSampleQuery(
+                sampleType: type,
+                predicate: predicate,
+                limit: HKObjectQueryNoLimit,
+                sortDescriptors: [sort]
+            ) { _, samples, error in
+                if let error {
+                    continuation.resume(throwing: error)
+                    return
+                }
+                continuation.resume(returning: samples as? [HKQuantitySample] ?? [])
+            }
+            healthStore.execute(query)
+        }
+    }
+
+    private func deleteObjects(
+        of type: HKObjectType,
+        predicate: NSPredicate
+    ) async throws -> Int {
+        try await withCheckedThrowingContinuation { continuation in
+            healthStore.deleteObjects(of: type, predicate: predicate) { success, count, error in
+                if success {
+                    continuation.resume(returning: count)
+                } else {
+                    continuation.resume(
+                        throwing: error ?? HealthArchiveError.deletionFailed
+                    )
+                }
+            }
+        }
+    }
+
+    private func saveSamples(_ samples: [HKSample]) async throws {
+        try await withCheckedThrowingContinuation {
+            (continuation: CheckedContinuation<Void, Error>) in
+            healthStore.save(samples) { success, error in
+                if success {
+                    continuation.resume()
+                } else {
+                    continuation.resume(
+                        throwing: error ?? HealthArchiveError.saveFailed
+                    )
+                }
+            }
+        }
+    }
+
     private static func providerName(sourceName: String, bundleIdentifier: String) -> String {
         let value = "\(sourceName) \(bundleIdentifier)".lowercased()
         let providers: [(needles: [String], name: String)] = [
@@ -302,6 +519,44 @@ final class HealthKitManager: ObservableObject {
         return providers.first(where: { provider in
             provider.needles.contains(where: value.contains)
         })?.name ?? sourceName
+    }
+
+    private static func detectDuplicateWeightGroups(
+        in samples: [HealthWeightSampleSummary]
+    ) -> [HealthDuplicateWeightGroup] {
+        let sortedSamples = samples.sorted { $0.date > $1.date }
+        var consumedSampleIDs = Set<UUID>()
+        var groups: [HealthDuplicateWeightGroup] = []
+
+        for anchor in sortedSamples {
+            guard !consumedSampleIDs.contains(anchor.id) else { continue }
+
+            let matchingSamples = sortedSamples.filter { candidate in
+                guard !consumedSampleIDs.contains(candidate.id) else { return false }
+                let timeDifference = abs(candidate.date.timeIntervalSince(anchor.date))
+                let weightDifference = abs(candidate.weightKilograms - anchor.weightKilograms)
+                return timeDifference <= duplicateTimeWindow
+                    && weightDifference <= duplicateWeightToleranceKilograms
+            }
+
+            let distinctSources = Set(matchingSamples.map(\.bundleIdentifier))
+            guard matchingSamples.count > 1, distinctSources.count > 1 else { continue }
+
+            matchingSamples.forEach { consumedSampleIDs.insert($0.id) }
+            groups.append(HealthDuplicateWeightGroup(
+                id: anchor.id,
+                samples: matchingSamples.sorted { $0.date < $1.date }
+            ))
+        }
+
+        return groups.sorted { $0.date > $1.date }
+    }
+
+    private static func sourceStatus(sourceCount: Int, duplicateCount: Int) -> String {
+        guard duplicateCount > 0 else {
+            return "发现 \(sourceCount) 个数据来源，未发现明显重复"
+        }
+        return "发现 \(sourceCount) 个数据来源，\(duplicateCount) 组可能重复"
     }
 
     private func makeSamples(for measurement: BodyMeasurement) -> [HKQuantitySample] {
@@ -361,15 +616,26 @@ final class HealthKitManager: ObservableObject {
             ? "segal_1988_v1"
             : "deurenberg_bmi_fallback_v1"
         var metadata: [String: Any] = [
-            HKMetadataKeySyncIdentifier: "afu-scale-\(measurement.id.uuidString)-\(metric)",
+            HKMetadataKeySyncIdentifier: Self.syncIdentifier(
+                measurementID: measurement.id,
+                metric: metric
+            ),
             HKMetadataKeySyncVersion: 1,
-            "tizhicheng.bodyAlgorithm": algorithm,
-            "tizhicheng.impedanceOhm": measurement.impedance
+            "xuanlprk.bodyAlgorithm": algorithm,
+            "xuanlprk.impedanceOhm": measurement.impedance
         ]
+        if let archiveData = try? JSONEncoder().encode(measurement),
+           let archive = String(data: archiveData, encoding: .utf8) {
+            metadata[Self.archiveMetadataKey] = archive
+        }
         if let adcIndex = measurement.adcIndex {
-            metadata["tizhicheng.adcNumber"] = adcIndex + 1
+            metadata["xuanlprk.adcNumber"] = adcIndex + 1
         }
         return metadata
+    }
+
+    private static func syncIdentifier(measurementID: UUID, metric: String) -> String {
+        "afu-scale-\(measurementID.uuidString)-\(metric)"
     }
 
     private func sample(
@@ -386,5 +652,30 @@ final class HealthKitManager: ObservableObject {
             end: measurement.date,
             metadata: metadata
         )
+    }
+}
+
+private extension HealthBodyMetric {
+    var syncMetricName: String {
+        switch self {
+        case .weight: "weight"
+        case .bmi: "bmi"
+        case .bodyFat: "body-fat"
+        case .leanBodyMass: "lean-body-mass"
+        }
+    }
+}
+
+private enum HealthArchiveError: LocalizedError {
+    case saveFailed
+    case deletionFailed
+
+    var errorDescription: String? {
+        switch self {
+        case .saveFailed:
+            "写入 Apple 健康失败"
+        case .deletionFailed:
+            "Apple 健康未能删除关联数据"
+        }
     }
 }

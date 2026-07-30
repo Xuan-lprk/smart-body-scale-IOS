@@ -42,6 +42,15 @@ struct DashboardView: View {
                 Spacer()
                 if scale.isMeasuring {
                     ProgressView().tint(.teal)
+                } else if scale.normalizedImpedances.count >= 2 {
+                    Text(verbatim: String(
+                        format: "ADC 1 %.0f Ω · ADC 2 %.0f Ω",
+                        scale.normalizedImpedances[0],
+                        scale.normalizedImpedances[1]
+                    ))
+                    .font(.caption)
+                    .fontWeight(.semibold)
+                    .foregroundStyle(.teal)
                 } else if scale.impedance > 0 {
                     Label(
                         scale.selectedADCIndex.map { "ADC \($0 + 1) · \(Int(scale.impedance)) Ω" }
